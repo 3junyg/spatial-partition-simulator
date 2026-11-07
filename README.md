@@ -50,12 +50,6 @@ Windows에서는 의존성 설치 후 `run_simulation.bat`를 실행해도 됩�
 python test_model.py
 ```
 
-## 참고 연구
-
-Demiröz, Altınel, Akarun (2019), *Rectangle blanket problem: Binary integer linear programming formulation and solution algorithms*. https://doi.org/10.1016/j.ejor.2019.02.004
-
-형태 근사 아이디어를 참고한 자체 확장 모델이며, 해당 논문의 branch-and-price 구현은 아닙니다.
-
 ## 라이선스
 
 이 프로젝트는 [MIT 라이선스](LICENSE)로 배포됩니다.
