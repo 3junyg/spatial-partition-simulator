@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+backup*/
+*.bak
+*.zip
+lambda_calibration.json
+lambda_controls_check.json
+예시_실험.json
