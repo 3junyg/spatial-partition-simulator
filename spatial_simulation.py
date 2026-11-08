@@ -29,7 +29,7 @@ class Application:
         self.field('구조 시드','shape_seed');self.field('사람 시드','people_seed');self.field('유입·유출 시드','flow_seed');self.field('환경 시드','environment_seed');self.field('초기 인원 분포','distribution',list(m.DENSITY_MODES.values()));self.field('평균 인원 생성 기준 (명/m²)','density_level')
         self.field('대표 관측 시간 (분)','minutes');self.button('① 가상 관측 생성',self.generate,True);self.button('시드 모두 무작위로 변경',self.randomize)
         self.heading('02 / 평활화·분할 기준')
-        self.field('유입·유출 평활화 λf (0–20)','smoothing');self.field('밀도 가중치 (0–1)','density_weight');self.field('특성 차이 경고 기준 (배율)','tolerance');self.field('구역 추가 비용 λM (직접 입력 가능)','rectangle_penalty');self.field('돌출 비용 β (0–10)','outside_penalty');self.field('최적화 시간 제한 (초, 1–300)','time_limit')
+        self.field('유입·유출 평활화 λf (0–20)','smoothing');self.field('밀도 가중치 (0–1)','density_weight');self.field('특성 차이 경고 기준 (배율)','tolerance');self.field('구역 추가 비용 λM (직접 입력 가능)','rectangle_penalty');self.field('최적화 시간 제한 (초, 1–300)','time_limit')
         self.button('② 설정 적용 · 격자 특성 갱신',self.refresh);self.button('③ 직사각형 최적화',self.solve,True);self.button('실험 JSON 저장',self.save);self.button('실험 JSON 열기',self.load);self.button('모델 설명 보기',self.explain)
         ttk.Label(self.controls,textvariable=self.status,wraplength=258,foreground='#076d56').pack(anchor='w',pady=10)
         ttk.Label(self.controls,text='정적인 가상 관측 데이터입니다.\n실제 시설 도면·실측값이 아닙니다.\n열·기류 물리 방정식을 풀지 않습니다.',wraplength=258,foreground='#617183').pack(anchor='w',pady=6)
@@ -49,6 +49,18 @@ class Application:
         self._lambda_sync=False
         self.lambda_slider=ttk.Scale(lambdabox,from_=-3,to=0,orient='horizontal',variable=self.lambda_position,command=self.lambda_slid);self.lambda_slider.pack(fill='x',pady=3);self.inputs.append(self.lambda_slider)
         self.vars['rectangle_penalty'].trace_add('write',self.lambda_edited)
+        beta_row = ttk.Frame(lambdabox)
+        beta_row.pack(fill='x', pady=(5, 3))
+        ttk.Label(beta_row, text='공간 밖 돌출 벌점 β').pack(side='left')
+        beta_entry = ttk.Entry(beta_row, textvariable=self.vars['outside_penalty'], width=7)
+        beta_entry.pack(side='left', padx=7)
+        self.inputs.append(beta_entry)
+        self.beta_position = tk.DoubleVar(value=m.Settings().outside_penalty)
+        beta_slider = ttk.Scale(beta_row, from_=0, to=10, variable=self.beta_position, command=self.beta_slid)
+        beta_slider.pack(side='left', fill='x', expand=True, padx=(0, 8))
+        self.inputs.append(beta_slider)
+        ttk.Label(beta_row, text='0–10 · 높을수록 돌출 억제').pack(side='right')
+        self.vars['outside_penalty'].trace_add('write', self.beta_edited)
         ttk.Label(main,textvariable=self.legend,foreground='#4f6476').pack(anchor='w',pady=5)
         self.notebook=ttk.Notebook(main);self.notebook.pack(fill='both',expand=True,pady=6);self.canvases={}
         for key,title in [('raw','01 원본 공간·인원'),('grid','02 4m² 격자 특성'),('result','03 최적화 분할')]:
@@ -120,7 +132,8 @@ class Application:
         for i,r in enumerate(result['rectangles']):self.table.insert('', 'end',iid=str(i),values=(i+1,f"{r['inside']:.2f}",f"{r['outside']:.2f}",*(f'{v:.3f}' for v in r['mean']),f"{r['error']/result['baseline'] if result['baseline']>1e-12 else 0:.5f}"))
         gap='미확보' if result['gap'] is None else f"{100*result['gap']:.2f}%"
         self.status.set(f"{result['status']} · {result['seconds']:.2f}초 · 최적성 간격 {gap}")
-        self.metrics.set(f"구역 {len(result['rectangles'])}개 | 실제 공간 커버 100% | 잔여 특성오차 {result['error_ratio']:.2%} | 돌출 {result['outside']:.2f}m² | 목적함수 {result['objective']:.4f} | 후보 {result['candidate_count']:,}개")
+        beta = result['settings']['outside_penalty']
+        self.metrics.set(f"구역 {len(result['rectangles'])}개 | 실제 공간 커버 100% | 잔여 특성오차 {result['error_ratio']:.2%} | 돌출 {result['outside']:.2f}m² (β={beta:g}) | 목적함수 {result['objective']:.4f} | 후보 {result['candidate_count']:,}개")
         self.details.set(f"큰 특성 차이가 남은 구역: {result.get('heterogeneity_warnings',0)}개. 적은 구역 수에 따른 근사 오차이며 기존의 엄격한 차이 제한을 만족한다는 뜻은 아닙니다.");self.notebook.select(2);self.draw_all()
     def set_lambda(self,value):
         self.vars['rectangle_penalty'].set(f'{value:.4f}')
@@ -141,6 +154,18 @@ class Application:
             self._lambda_sync=True
             try:self.lambda_position.set(math.log10(value))
             finally:self._lambda_sync=False
+
+    def beta_slid(self, value):
+        self.vars['outside_penalty'].set(f'{float(value):.2f}')
+
+    def beta_edited(self, *_):
+        try:
+            value = float(self.vars['outside_penalty'].get())
+        except ValueError:
+            return
+        if 0 <= value <= 10:
+            self.beta_position.set(value)
+            self.status.set('돌출 벌점 변경 · 계산 버튼으로 다시 계산하세요.')
 
     def compare_lambdas(self):
         if self.busy:return
