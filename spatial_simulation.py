@@ -56,10 +56,10 @@ class Application:
         beta_entry.pack(side='left', padx=7)
         self.inputs.append(beta_entry)
         self.beta_position = tk.DoubleVar(value=m.Settings().outside_penalty)
-        beta_slider = ttk.Scale(beta_row, from_=0, to=10, variable=self.beta_position, command=self.beta_slid)
+        beta_slider = ttk.Scale(beta_row, from_=0, to=30, variable=self.beta_position, command=self.beta_slid)
         beta_slider.pack(side='left', fill='x', expand=True, padx=(0, 8))
         self.inputs.append(beta_slider)
-        ttk.Label(beta_row, text='0–10 · 높을수록 돌출 억제').pack(side='right')
+        ttk.Label(beta_row, text='0–30 · 높을수록 돌출 억제').pack(side='right')
         self.vars['outside_penalty'].trace_add('write', self.beta_edited)
         ttk.Label(main,textvariable=self.legend,foreground='#4f6476').pack(anchor='w',pady=5)
         self.notebook=ttk.Notebook(main);self.notebook.pack(fill='both',expand=True,pady=6);self.canvases={}
@@ -163,7 +163,7 @@ class Application:
             value = float(self.vars['outside_penalty'].get())
         except ValueError:
             return
-        if 0 <= value <= 10:
+        if 0 <= value <= 30:
             self.beta_position.set(value)
             self.status.set('돌출 벌점 변경 · 계산 버튼으로 다시 계산하세요.')
 

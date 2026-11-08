@@ -41,7 +41,7 @@ def validate(s):
     if (s.width_m,s.height_m) not in [(32,20),(48,32),(64,40)]: raise ValueError('지원하지 않는 공간 크기입니다.')
     vals=[s.density_level,s.minutes,s.smoothing,s.density_weight,s.tolerance,s.rectangle_penalty,s.outside_penalty,s.time_limit]
     if not all(math.isfinite(v) for v in vals): raise ValueError('설정에 유한한 숫자를 입력하세요.')
-    if not 0<=s.density_level<=5 or not s.minutes>0 or not 0<=s.smoothing<=20 or not 0<=s.density_weight<=1 or not 0<s.tolerance<=5 or not 0<s.rectangle_penalty<=1 or not 0<=s.outside_penalty<=10 or not 1<=s.time_limit<=300: raise ValueError('설정값이 허용 범위를 벗어났습니다.')
+    if not 0<=s.density_level<=5 or not s.minutes>0 or not 0<=s.smoothing<=20 or not 0<=s.density_weight<=1 or not 0<s.tolerance<=5 or not 0<s.rectangle_penalty<=1 or not 0<=s.outside_penalty<=30 or not 1<=s.time_limit<=300: raise ValueError('설정값이 허용 범위를 벗어났습니다.')
 
 def rng(seed):
     import hashlib
