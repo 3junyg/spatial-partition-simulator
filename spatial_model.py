@@ -1,4 +1,4 @@
-"""Static 4m² feature partitioning with sparse binary mixed-integer optimization.
+"""Static 1m² feature partitioning with sparse binary mixed-integer optimization.
 
 All demo observations are synthetic. Continuous internal geometry is raster sampled.
 No temperature/airflow physics is solved here. See MODEL.md for definitions.
@@ -7,7 +7,7 @@ from dataclasses import dataclass, asdict
 import math
 import time
 import numpy as np
-from scipy.sparse import coo_matrix, diags
+from scipy.sparse import coo_matrix, csc_matrix, diags
 from scipy.sparse.linalg import spsolve
 from scipy.optimize import milp, Bounds, LinearConstraint
 import scenario_generator as demo
@@ -16,6 +16,7 @@ PRESETS=demo.PRESETS
 DENSITY_MODES=demo.DENSITY_MODES
 WEIGHTS=np.array([.6,.1,.1,.2])
 FEATURES=('밀도','평활 유입','평활 유출','환경 지표')
+CELL_M = 1
 
 @dataclass
 class Settings:
@@ -72,18 +73,22 @@ def standardize(values,area):
     out=(values-mean)/scale;out[:,sd<=1e-10]=0
     return out,mean,sd
 
-def generate(s):
-    validate(s);w=s.width_m//2;h=s.height_m//2
+def generate(s, cell_m=CELL_M):
+    validate(s)
+    if cell_m not in (1, 2):
+        raise ValueError('격자 한 변은 1m 또는 2m여야 합니다.')
+    w, h = s.width_m // cell_m, s.height_m // cell_m
+    pixels_per_m2 = 36 / cell_m ** 2
     original=np.array(demo.generate_shape(s.preset,s.shape_seed)).reshape(demo.HEIGHT,demo.WIDTH)
     yy=np.minimum((np.arange(h*6)+.5)*demo.HEIGHT/(h*6),demo.HEIGHT-1).astype(int)
     xx=np.minimum((np.arange(w*6)+.5)*demo.WIDTH/(w*6),demo.WIDTH-1).astype(int)
     mask=original[np.ix_(yy,xx)]
-    area=mask.reshape(h,6,w,6).sum(axis=(1,3)).ravel()/9.
+    area=mask.reshape(h,6,w,6).sum(axis=(1,3)).ravel()/pixels_per_m2
     active=area>0;total=area.sum()
     if not total: raise ValueError('실제 공간이 비어 있습니다.')
     expected=np.array(demo.generate_density(original.ravel().tolist(),s.people_seed,s.distribution,s.density_level)).reshape(demo.HEIGHT,demo.WIDTH)
     fine_density=expected[np.ix_(yy,xx)]*mask
-    expected_count=fine_density.reshape(h,6,w,6).sum(axis=(1,3)).ravel()/9.
+    expected_count=fine_density.reshape(h,6,w,6).sum(axis=(1,3)).ravel()/pixels_per_m2
     people_rng=rng(s.people_seed);counts=people_rng.poisson(expected_count);counts[~active]=0
     density=np.divide(counts,area,out=np.zeros_like(area),where=active)
     edges=edges_for(mask,w,h);wflow=rng(s.flow_seed)
@@ -121,52 +126,136 @@ def generate(s):
         for _ in range(n):
             py,px=valid[people_rng.integers(len(valid))]
             person_positions.append(((cx*6+px+.5)/(w*6),(cy*6+py+.5)/(h*6)))
-    return dict(w=w,h=h,mask=mask,area=area,active=active,counts=counts,density=density,cin=cin,cout=cout,fin0=fin0,fout0=fout0,fin=fin,fout=fout,env=env,env_reference=envmean,env_sd=envsd,environment=ed,z=z,y=y,means=means,scales=scales,edges=edges,people=person_positions)
+    return dict(w=w,h=h,cell_m=cell_m,mask=mask,area=area,active=active,counts=counts,density=density,cin=cin,cout=cout,fin0=fin0,fout0=fout0,fin=fin,fout=fout,env=env,env_reference=envmean,env_sd=envsd,environment=ed,z=z,y=y,means=means,scales=scales,edges=edges,people=person_positions)
 
 def candidate_rectangles(scene,s,progress=lambda _:None):
     w,h=scene['w'],scene['h'];area=scene['area'];active=scene['active'];y=scene['y'];z=scene['z']
+    cell_m=scene.get('cell_m', CELL_M)
     wd=s.density_weight;weights=np.array([wd,(1-wd)/4,(1-wd)/4,(1-wd)/2])
     # wd=.6 gives .6/.1/.1/.2. Feature ranges are diagnostic, never hard gates.
     baseline=float(np.sum(area[:,None]*weights*y*y));total=area.sum()
-    limits=np.array([1.,2.,2.,2.])*s.tolerance
-    grid_y=y.reshape(h,w,4);grid_a=area.reshape(h,w);grid_z=z.reshape(h,w,4)
-    result=[];attempted=0;rejected=0
-    for top in range(h):
-        ca=np.zeros(w);su=np.zeros((w,4));sq=su.copy();original=su.copy();lo=np.full((w,4),np.inf);hi=np.full((w,4),-np.inf)
-        for bottom in range(top,h):
-            a=grid_a[bottom];v=grid_y[bottom];present=a>0
-            ca+=a;su+=a[:,None]*v;sq+=a[:,None]*v*v;original+=a[:,None]*grid_z[bottom]
-            lo=np.minimum(lo,np.where(present[:,None],v,np.inf));hi=np.maximum(hi,np.where(present[:,None],v,-np.inf))
-            for left in range(w):
-                ar=0.;ss=np.zeros(4);qq=ss.copy();oz=ss.copy();mn=np.full(4,np.inf);mx=np.full(4,-np.inf)
-                for right in range(left,w):
-                    ar+=ca[right];ss+=su[right];qq+=sq[right];oz+=original[right];mn=np.minimum(mn,lo[right]);mx=np.maximum(mx,hi[right])
-                    if ar<=0:continue
-                    attempted+=1
-                    rw=right-left+1;rh=bottom-top+1
-                    err=float(np.dot(weights,np.maximum(0,qq-ss*ss/ar)))
-                    outside=max(0.,rw*rh*4-ar)
-                    cost=(err/baseline if baseline>1e-12 else 0)+s.rectangle_penalty+s.outside_penalty*outside/total
-                    # Spatially tighten: never keep an entirely empty outer row/column.
-                    part=grid_a[top:bottom+1,left:right+1]
-                    if not (part[0].any() and part[-1].any() and part[:,0].any() and part[:,-1].any()):continue
-                    result.append(dict(x=left,y=top,w=rw,h=rh,inside=ar,outside=outside,error=err,cost=cost,mean=(oz/ar).tolist(),ranges=(mx-mn).tolist()))
-        progress(f'직사각형 후보 생성 {top+1}/{h}행 · 유효 후보 {len(result):,}개')
-    return result,baseline,weights,dict(attempted=attempted,rejected=rejected)
+    def integral(values):
+        grid = values.reshape(h,w,-1)
+        return np.pad(grid.cumsum(axis=0).cumsum(axis=1), ((1,0),(1,0),(0,0)))
+
+    occupancy = integral(active.astype(int))[:,:,0]
+    grid_area = integral(area)[:,:,0]
+    first = integral(area[:,None]*y)
+    second = integral(area[:,None]*y*y)
+    original = integral(area[:,None]*z)
+    active_y,active_x=np.nonzero(active.reshape(h,w))
+    ymin,ymax=int(active_y.min()),int(active_y.max())+1
+    xmin,xmax=int(active_x.min()),int(active_x.max())+1
+    boxes=[]
+    attempted=0
+    for top in range(ymin,ymax):
+        for bottom in range(top+1,ymax+1):
+            height=bottom-top
+            band=occupancy[bottom]-occupancy[top]
+            above=occupancy[top]-occupancy[max(0,top-1)]
+            below=occupancy[min(h,bottom+1)]-occupancy[bottom]
+            for left in range(xmin,xmax):
+                if band[left+1]==band[left]:
+                    continue
+                right=np.arange(left+1,xmax+1)
+                width=right-left
+                count=band[right]-band[left]
+                tight=(band[right]>band[right-1]) & (occupancy[top+1,right]-occupancy[top,right]>occupancy[top+1,left]-occupancy[top,left]) & (occupancy[bottom,right]-occupancy[bottom-1,right]>occupancy[bottom,left]-occupancy[bottom-1,left])
+                attempted+=int(tight.sum())
+                if cell_m==1:
+                    small=(height<=4)&(width<=4)
+                    aligned=(top%4==0)&(bottom%4==0)&(left%4==0)&(right%4==0)
+                    medium=(height<=12)&(width<=12)&(top%2==0)&(bottom%2==0)&(left%2==0)&(right%2==0)
+                    maximal_x=((left==0) or band[left]-band[left-1]<height)&((right==w)|(band[np.minimum(w,right+1)]-band[right]<height))
+                    maximal_y=((top==0)|(above[right]-above[left]<width))&((bottom==h)|(below[right]-below[left]<width))
+                    bounds=(top==ymin)&(bottom==ymax)&(left==xmin)&(right==xmax)
+                    tight &= small|aligned|medium|((count==width*height)&(maximal_x|maximal_y))|bounds
+                boxes.extend((top,bottom,left,int(r)) for r in right[tight])
+        progress(f'직사각형 후보 생성 {top-ymin+1}/{ymax-ymin}행 · 유효 후보 {len(boxes):,}개')
+
+    top,bottom,left,right=np.asarray(boxes,dtype=int).T
+    def rectangle_sum(prefix):
+        return prefix[bottom,right]-prefix[top,right]-prefix[bottom,left]+prefix[top,left]
+    inside=rectangle_sum(grid_area)
+    mean=rectangle_sum(original)/inside[:,None]
+    errors=np.maximum(0,rectangle_sum(second)-rectangle_sum(first)**2/inside[:,None])@weights
+    widths,heights=right-left,bottom-top
+    outside=np.maximum(0,widths*heights*cell_m**2-inside)
+    costs=(errors/baseline if baseline>1e-12 else np.zeros_like(errors))+s.rectangle_penalty+s.outside_penalty*outside/total
+    result=[dict(x=int(x),y=int(y0),w=int(dx),h=int(dy),inside=float(a),outside=float(o),error=float(e),cost=float(c),mean=m.tolist())
+            for x,y0,dx,dy,a,o,e,c,m in zip(left,top,widths,heights,inside,outside,errors,costs,mean)]
+    return result,baseline,weights,dict(attempted=attempted,rejected=attempted-len(result))
+
+
+def run_cover(active, transpose=False):
+    """Tile active cells with maximal runs, merging identical runs across rows."""
+    if transpose:
+        active=active.T
+    pending={}
+    result=[]
+    for y,row in enumerate(active):
+        cuts=np.flatnonzero(np.diff(np.r_[False,row,False]))
+        current={}
+        for x,end in zip(cuts[::2],cuts[1::2]):
+            key=(int(x),int(end-x))
+            current[key]=pending.pop(key,y)
+        result.extend((x,start,width,y-start) for (x,width),start in pending.items())
+        pending=current
+    result.extend((x,start,width,len(active)-start) for (x,width),start in pending.items())
+    return [(y,x,h,w) for x,y,w,h in result] if transpose else result
+
+def merge_cover(rectangles, lookup):
+    """Improve a feasible fallback by merging compatible rectangles."""
+    while 1<len(rectangles)<=80:
+        best=None
+        saving=1e-9
+        for i,a in enumerate(rectangles):
+            for j in range(i+1,len(rectangles)):
+                b=rectangles[j]
+                x,y=min(a['x'],b['x']),min(a['y'],b['y'])
+                right=max(a['x']+a['w'],b['x']+b['w'])
+                bottom=max(a['y']+a['h'],b['y']+b['h'])
+                merged=lookup.get((x,y,right-x,bottom-y))
+                if merged is None or abs(merged['inside']-a['inside']-b['inside'])>1e-7:
+                    continue
+                gain=a['cost']+b['cost']-merged['cost']
+                if gain<=saving:
+                    continue
+                if any(x<c['x']+c['w'] and c['x']<right and y<c['y']+c['h'] and c['y']<bottom
+                       for k,c in enumerate(rectangles) if k!=i and k!=j):
+                    continue
+                best=(i,j,merged)
+                saving=gain
+        if best is None:
+            break
+        i,j,merged=best
+        rectangles[i]=merged
+        rectangles.pop(j)
+    return rectangles
+
 
 def optimize(scene,s,progress=lambda _:None):
     validate(s);start=time.perf_counter();candidates,baseline,weights,stats=candidate_rectangles(scene,s,progress)
-    w,h=scene['w'],scene['h'];n=w*h;rows=[];cols=[]
+    w,h=scene['w'],scene['h'];n=w*h
+    footprints=np.fromiter((r['w']*r['h'] for r in candidates),dtype=np.int32,count=len(candidates))
+    starts=np.r_[np.int32(0),np.cumsum(footprints,dtype=np.int32)]
+    rows=np.empty(starts[-1],dtype=np.int32)
+    x_offsets=np.arange(w,dtype=np.int32)
+    y_offsets=np.arange(h,dtype=np.int32)*w
     for j,r in enumerate(candidates):
-        for yy in range(r['y'],r['y']+r['h']):
-            rows.extend(range(yy*w+r['x'],yy*w+r['x']+r['w']));cols.extend([j]*r['w'])
-    A=coo_matrix((np.ones(len(rows)),(rows,cols)),shape=(n,len(candidates))).tocsc()
+        origin=r['y']*w+r['x']
+        offsets=y_offsets[:r['h'],None]+x_offsets[None,:r['w']]
+        rows[starts[j]:starts[j+1]]=origin+offsets.ravel()
+    A=csc_matrix((np.ones(len(rows)),rows,starts),shape=(n,len(candidates)))
     cost=np.array([r['cost'] for r in candidates]);lower=scene['active'].astype(float)
     progress(f'0–1 정수최적화 · 후보 {len(candidates):,}개 / 최대 {s.time_limit:g}초')
-    # Valid single-cell cover supplies an incumbent/cutoff even if the solver times out.
-    fallback=[r for r in candidates if r['w']==1 and r['h']==1]
-    full=[r for r in candidates if np.isclose(r['inside'],scene['area'].sum())]
-    if full and min(full,key=lambda r:r['cost'])['cost']<sum(r['cost'] for r in fallback):fallback=[min(full,key=lambda r:r['cost'])]
+    lookup={(r['x'],r['y'],r['w'],r['h']):r for r in candidates}
+    active_grid=scene['active'].reshape(h,w)
+    covers=[[r for r in candidates if r['w']==1 and r['h']==1]]
+    covers.extend(merge_cover([lookup[box] for box in run_cover(active_grid,transpose)],lookup)
+                  for transpose in (False,True))
+    covers.extend([r] for r in candidates if abs(r['inside']-scene['area'].sum())<1e-7)
+    fallback=min(covers,key=lambda rs:sum(r['cost'] for r in rs))
     fallbackcost=sum(r['cost'] for r in fallback)
     result=milp(cost,integrality=np.ones(len(cost)),bounds=Bounds(0,1),constraints=LinearConstraint(A,lower,np.ones(n)),options={'time_limit':s.time_limit,'mip_rel_gap':.001,'presolve':False})
     if result.x is None:
@@ -176,8 +265,13 @@ def optimize(scene,s,progress=lambda _:None):
         verify(scene,chosen)
         chosen_cost=sum(r['cost'] for r in chosen)
         if chosen_cost>fallbackcost+1e-8:chosen=fallback;status='유효 대체 분할이 더 저렴하여 사용';gap=None;optimal=False
-        else:status='정수최적화 완료' if result.status==0 else '시간 제한: 현재까지 찾은 정수해';gap=getattr(result,'mip_gap',None);optimal=result.status==0
+        else:status='후보 범위 내 정수최적화 완료' if result.status==0 else '시간 제한: 현재까지 찾은 정수해';gap=getattr(result,'mip_gap',None);optimal=result.status==0
     verify(scene,chosen)
+    grid_y=scene['y'].reshape(h,w,4)
+    for r in chosen:
+        xs=slice(r['x'],r['x']+r['w'])
+        ys=slice(r['y'],r['y']+r['h'])
+        r['ranges']=np.ptp(grid_y[ys,xs][active_grid[ys,xs]],axis=0).tolist()
     return dict(rectangles=chosen,candidate_count=len(candidates),baseline=baseline,weights=weights.tolist(),status=status,gap=gap,optimal=optimal,seconds=time.perf_counter()-start,objective=sum(r['cost'] for r in chosen),error_ratio=sum(r['error'] for r in chosen)/baseline if baseline>1e-12 else 0,outside=sum(r['outside'] for r in chosen),settings=asdict(s),unrestricted=True,heterogeneity_warnings=int(sum(np.any(np.array(r['ranges'])>np.array([1,2,2,2])*s.tolerance+1e-9) for r in chosen)),**stats)
 
 def verify(scene,rects,limits=None):

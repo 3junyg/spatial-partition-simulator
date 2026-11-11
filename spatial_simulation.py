@@ -25,7 +25,7 @@ class Application:
         self.inputs=[];self.buttons=[]
         ttk.Label(self.controls,text='공간 분할 실험실',style='Title.TLabel').pack(anchor='w',pady=(0,10))
         self.heading('01 / 시드와 예시 관측')
-        self.field('장소 유형','preset',list(m.PRESETS.values()));self.field('가상 공간 크기 · 기본 셀 2m × 2m','size',['32 × 20 m','48 × 32 m','64 × 40 m'])
+        self.field('장소 유형','preset',list(m.PRESETS.values()));self.field('가상 공간 크기 · 기본 셀 1m × 1m','size',['32 × 20 m','48 × 32 m','64 × 40 m'])
         self.field('구조 시드','shape_seed');self.field('사람 시드','people_seed');self.field('유입·유출 시드','flow_seed');self.field('환경 시드','environment_seed');self.field('초기 인원 분포','distribution',list(m.DENSITY_MODES.values()));self.field('평균 인원 생성 기준 (명/m²)','density_level')
         self.field('대표 관측 시간 (분)','minutes');self.button('① 가상 관측 생성',self.generate,True);self.button('시드 모두 무작위로 변경',self.randomize)
         self.heading('02 / 평활화·분할 기준')
@@ -63,7 +63,7 @@ class Application:
         self.vars['outside_penalty'].trace_add('write', self.beta_edited)
         ttk.Label(main,textvariable=self.legend,foreground='#4f6476').pack(anchor='w',pady=5)
         self.notebook=ttk.Notebook(main);self.notebook.pack(fill='both',expand=True,pady=6);self.canvases={}
-        for key,title in [('raw','01 원본 공간·인원'),('grid','02 4m² 격자 특성'),('result','03 최적화 분할')]:
+        for key,title in [('raw','01 원본 공간·인원'),('grid','02 격자 특성'),('result','03 최적화 분할')]:
             frame=ttk.Frame(self.notebook);self.notebook.add(frame,text=title);c=tk.Canvas(frame,width=800,height=210,bg=OUTSIDE,highlightthickness=0);c.pack(fill='both',expand=True);c.bind('<Configure>',lambda e,key=key:self.draw(key));c.bind('<Motion>',self.inspect);self.canvases[key]=c
         ttk.Label(main,text='흰 테두리+검은 실선: 실제 공간 / 색 점선+번호: 직사각형 / 사선: 공간 밖 돌출',foreground='#53677a').pack(anchor='w')
         ttk.Label(main,textvariable=self.metrics,font=('맑은 고딕',10,'bold'),wraplength=1050).pack(anchor='w',pady=8)
@@ -86,13 +86,23 @@ class Application:
     def update_vars(self,s):
         for k,v in asdict(s).items():self.vars[k].set(str(v))
         self.vars['preset'].set(m.PRESETS[s.preset]);self.vars['distribution'].set(m.DENSITY_MODES[s.distribution]);self.vars['size'].set(f'{s.width_m} × {s.height_m} m')
-    def generate(self):
+    def generate(self, cell_m=m.CELL_M):
         if self.busy:return
-        try:s=self.settings();self.scene=m.generate(s);self.loaded_settings=s;self.scene_settings=asdict(s);self.clear_result();self.status.set('가상 인원·관측 생성 및 평활화 완료.');self.info.set(f"{s.width_m}m × {s.height_m}m 가상 영역 · {self.scene['w']} × {self.scene['h']} 격자 · 실제 면적 {self.scene['area'].sum():.1f}m² · {self.scene['counts'].sum()}명");self.draw_all()
+        try:
+            s=self.settings()
+            self.use_scene(m.generate(s,cell_m),s)
         except Exception as e:messagebox.showerror('입력 오류',str(e))
+    def use_scene(self,scene,s):
+        self.scene=scene
+        self.loaded_settings=s
+        self.scene_settings=asdict(s)
+        self.clear_result()
+        self.status.set('가상 인원·관측 생성 및 평활화 완료.')
+        self.info.set(f"{s.width_m}m × {s.height_m}m 가상 영역 · {scene['w']} × {scene['h']}칸 ({scene['cell_m']**2}m²/칸) · 실제 면적 {scene['area'].sum():.1f}m² · {scene['counts'].sum()}명")
+        self.draw_all()
     def refresh(self):
         # Regenerate with the same seeds: observations stay identical if only lambda changes.
-        self.generate()
+        self.generate(self.scene['cell_m'] if self.scene else m.CELL_M)
     def randomize(self):
         for k in ['shape_seed','people_seed','flow_seed','environment_seed']:self.vars[k].set(str(random.SystemRandom().randrange(2**32)))
         self.generate()
@@ -102,7 +112,7 @@ class Application:
         if self.busy:return
         try:
             s=self.settings()
-            if self.scene is None or asdict(s)!=self.scene_settings:self.generate()
+            if self.scene is None or asdict(s)!=self.scene_settings:self.refresh()
             if self.scene is None or asdict(s)!=self.scene_settings:return
         except Exception as e:messagebox.showerror('설정 오류',str(e));return
         self.busy=True
@@ -171,7 +181,7 @@ class Application:
         if self.busy:return
         try:
             s=self.settings()
-            if self.scene is None or asdict(s)!=self.scene_settings:self.generate()
+            if self.scene is None or asdict(s)!=self.scene_settings:self.refresh()
             if self.scene is None or asdict(s)!=self.scene_settings:return
         except Exception as e:messagebox.showerror('설정 오류',str(e));return
         center=s.rectangle_penalty
@@ -259,7 +269,8 @@ class Application:
                                 c.create_line(ox+xx*sc+2,oy+yy*sc+2,ox+(xx+1)*sc-2,oy+(yy+1)*sc-2,fill='#67768b')
                     c.create_rectangle(x+2,y+2,right-2,bottom-2,outline='white',width=5)
                     c.create_rectangle(x+2,y+2,right-2,bottom-2,outline=color,width=2,dash=(6,3))
-                    c.create_rectangle(x+2,y+2,x+23,y+20,fill=color,outline='');c.create_text(x+12,y+11,text=str(j+1),fill='white',font=('맑은 고딕',8,'bold'))
+                    if min(right-x,bottom-y)>=22:
+                        c.create_rectangle(x+2,y+2,x+23,y+20,fill=color,outline='');c.create_text(x+12,y+11,text=str(j+1),fill='white',font=('맑은 고딕',8,'bold'))
                     if self.hover==j:c.create_rectangle(x+1,y+1,right-1,bottom-1,outline='#00e5ff',width=5)
         self.boundary(c,sc,ox,oy)
     def boundary(self,c,sc,ox,oy):
@@ -284,19 +295,22 @@ class Application:
         if self.scene is None:return
         path=filedialog.asksaveasfilename(defaultextension='.json',filetypes=[('실험 JSON','*.json')])
         if not path:return
-        data={'version':3,'settings':self.scene_settings,'observations':{key:self.scene[key].tolist() for key in ['mask','counts','cin','cout','env']},'solution':self.solution}
+        data={'version':4,'cell_m':self.scene['cell_m'],'settings':self.scene_settings,'observations':{key:self.scene[key].tolist() for key in ['mask','counts','cin','cout','env']},'solution':self.solution}
         Path(path).write_text(json.dumps(data,ensure_ascii=False,allow_nan=False),encoding='utf-8');self.status.set('실험과 관측값·계산 결과를 저장했습니다.')
     def load(self):
         path=filedialog.askopenfilename(filetypes=[('실험 JSON','*.json')])
         if not path:return
         try:
             data=json.loads(Path(path).read_text(encoding='utf-8'))
-            if data.get('version')!=3:raise ValueError('이번 버전에서 저장한 v3 파일만 열 수 있습니다.')
-            s=m.Settings(**data['settings']);m.validate(s);self.update_vars(s);self.generate()
+            if data.get('version') not in (3,4):raise ValueError('v3 또는 v4 실험 파일을 선택하세요.')
+            cell_m=2 if data['version']==3 else data['cell_m']
+            s=m.Settings(**data['settings'])
+            scene=m.generate(s,cell_m)
             obs=data['observations']
             for key in ['mask','counts','cin','cout','env']:
-                a=np.array(obs[key]);expected=self.scene[key]
+                a=np.array(obs[key]);expected=scene[key]
                 if a.shape!=expected.shape or not np.array_equal(a,expected):raise ValueError('저장된 관측값이 시드·설정과 일치하지 않습니다.')
+            self.update_vars(s);self.use_scene(scene,s)
             if data.get('solution'):
                 r=data['solution']
                 if r.get('unrestricted'):
